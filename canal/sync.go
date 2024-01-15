@@ -4,11 +4,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/pingcap/errors"
+	"github.com/pingcap/tidb/pkg/parser/ast"
+
 	"github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/go-mysql-org/go-mysql/replication"
 	"github.com/go-mysql-org/go-mysql/schema"
-	"github.com/pingcap/errors"
-	"github.com/pingcap/tidb/pkg/parser/ast"
 )
 
 func (c *Canal) startSyncer() (*replication.BinlogStreamer, error) {
@@ -133,6 +134,10 @@ func (c *Canal) runSyncBinlog() error {
 				return errors.Trace(err)
 			}
 		case *replication.QueryEvent:
+			if !c.checkTableMatch(string(e.Schema)) {
+				continue
+			}
+
 			stmts, _, err := c.parser.Parse(string(e.Query), "", "")
 			if err != nil {
 				c.cfg.Logger.Errorf("parse query(%s) err %v, will skip this event", e.Query, err)
@@ -223,11 +228,13 @@ func parseStmt(stmt ast.StmtNode) (ns []*node) {
 func (c *Canal) updateTable(header *replication.EventHeader, db, table string) (err error) {
 	c.ClearTableCache([]byte(db), []byte(table))
 	c.cfg.Logger.Infof("table structure changed, clear table cache: %s.%s\n", db, table)
-	if err = c.eventHandler.OnTableChanged(header, db, table); err != nil && errors.Cause(err) != schema.ErrTableNotExist {
+	if err = c.eventHandler.OnTableChanged(header, db, table); err != nil &&
+		errors.Cause(err) != schema.ErrTableNotExist {
 		return errors.Trace(err)
 	}
 	return
 }
+
 func (c *Canal) updateReplicationDelay(ev *replication.BinlogEvent) {
 	var newDelay uint32
 	now := uint32(time.Now().Unix())
@@ -256,11 +263,17 @@ func (c *Canal) handleRowsEvent(e *replication.BinlogEvent) error {
 	}
 	var action string
 	switch e.Header.EventType {
-	case replication.WRITE_ROWS_EVENTv1, replication.WRITE_ROWS_EVENTv2, replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
+	case replication.WRITE_ROWS_EVENTv1,
+		replication.WRITE_ROWS_EVENTv2,
+		replication.MARIADB_WRITE_ROWS_COMPRESSED_EVENT_V1:
 		action = InsertAction
-	case replication.DELETE_ROWS_EVENTv1, replication.DELETE_ROWS_EVENTv2, replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
+	case replication.DELETE_ROWS_EVENTv1,
+		replication.DELETE_ROWS_EVENTv2,
+		replication.MARIADB_DELETE_ROWS_COMPRESSED_EVENT_V1:
 		action = DeleteAction
-	case replication.UPDATE_ROWS_EVENTv1, replication.UPDATE_ROWS_EVENTv2, replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
+	case replication.UPDATE_ROWS_EVENTv1,
+		replication.UPDATE_ROWS_EVENTv2,
+		replication.MARIADB_UPDATE_ROWS_COMPRESSED_EVENT_V1:
 		action = UpdateAction
 	default:
 		return errors.Errorf("%s not supported now", e.Header.EventType)
